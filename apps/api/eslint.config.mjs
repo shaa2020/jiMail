@@ -8,4 +8,5 @@ export default tseslint.config(
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
     },
   },
+  { files: ['**/*.js'], rules: { '@typescript-eslint/no-require-imports': 'off' } },
 );

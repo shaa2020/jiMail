@@ -1,6 +1,7 @@
 import sanitizeHtml from 'sanitize-html';
 
-const SAFE_STYLE = /^[^<>"'`\\]*$/;
+// Rejects url(), expression(), escapes and quotes: blocks CSS-based tracking and legacy script vectors.
+const SAFE_STYLE = /^(?!.*(?:url\s*\(|expression|javascript|@import|behavior|\\))[^<>"'`]*$/i;
 const styleProps = [
   'color', 'background-color', 'background', 'font-size', 'font-weight', 'font-style', 'font-family', 'text-align',
   'text-decoration', 'line-height', 'margin', 'margin-top', 'margin-bottom', 'margin-left', 'margin-right', 'padding',

@@ -1,0 +1,187 @@
+@import 'tailwindcss';
+
+/* ───────── JiMail design tokens ─────────
+   Petrol is the brand surface, Saffron is the single sparing accent.
+   Every colour is a token so light and dark themes stay in lockstep. */
+:root {
+  --paper: #f4f7f7;
+  --surface: #ffffff;
+  --surface-2: #eef3f3;
+  --line: #dbe4e5;
+  --line-strong: #c4d1d3;
+  --ink: #12262a;
+  --ink-2: #3d5357;
+  --ink-3: #6b7f83;
+  --petrol: #0f5257;
+  --petrol-ink: #0a3c40;
+  --petrol-soft: #e1eeee;
+  --saffron: #f0a23a;
+  --saffron-soft: #fdf0dc;
+  --ok: #1e8a5a;
+  --ok-soft: #e2f3ea;
+  --warn: #a8670b;
+  --warn-soft: #fbefd9;
+  --bad: #c4323f;
+  --bad-soft: #fbe5e7;
+  --side: #0c3f43;
+  --side-ink: #d7e8e8;
+  --side-muted: #8fb1b3;
+  --side-active: #15585d;
+  --focus: #f0a23a;
+  --shadow: 0 1px 2px rgb(18 38 42 / 0.06), 0 4px 16px rgb(18 38 42 / 0.05);
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --paper: #0b1416;
+    --surface: #111d20;
+    --surface-2: #16252a;
+    --line: #22363b;
+    --line-strong: #2e464c;
+    --ink: #e4eeef;
+    --ink-2: #b4c5c8;
+    --ink-3: #7f9599;
+    --petrol: #3fa7a6;
+    --petrol-ink: #7fd0cd;
+    --petrol-soft: #13302f;
+    --saffron: #f3b25a;
+    --saffron-soft: #3a2a12;
+    --ok: #46c08a;
+    --ok-soft: #12301f;
+    --warn: #e2a64a;
+    --warn-soft: #33260f;
+    --bad: #ef6b75;
+    --bad-soft: #3a171b;
+    --side: #08191b;
+    --side-ink: #d2e3e4;
+    --side-muted: #7c9da0;
+    --side-active: #12353a;
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.3);
+    color-scheme: dark;
+  }
+}
+:root[data-theme='dark'] {
+  --paper: #0b1416;
+  --surface: #111d20;
+  --surface-2: #16252a;
+  --line: #22363b;
+  --line-strong: #2e464c;
+  --ink: #e4eeef;
+  --ink-2: #b4c5c8;
+  --ink-3: #7f9599;
+  --petrol: #3fa7a6;
+  --petrol-ink: #7fd0cd;
+  --petrol-soft: #13302f;
+  --saffron: #f3b25a;
+  --saffron-soft: #3a2a12;
+  --ok: #46c08a;
+  --ok-soft: #12301f;
+  --warn: #e2a64a;
+  --warn-soft: #33260f;
+  --bad: #ef6b75;
+  --bad-soft: #3a171b;
+  --side: #08191b;
+  --side-ink: #d2e3e4;
+  --side-muted: #7c9da0;
+  --side-active: #12353a;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.3);
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-petrol: var(--petrol);
+  --color-petrol-ink: var(--petrol-ink);
+  --color-petrol-soft: var(--petrol-soft);
+  --color-saffron: var(--saffron);
+  --color-saffron-soft: var(--saffron-soft);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-side: var(--side);
+  --color-side-ink: var(--side-ink);
+  --color-side-muted: var(--side-muted);
+  --color-side-active: var(--side-active);
+  --font-display: var(--font-bricolage), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-plex), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, monospace;
+  --shadow-card: var(--shadow);
+}
+
+html,
+body {
+  background: var(--paper);
+  color: var(--ink);
+}
+body {
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  letter-spacing: -0.015em;
+  line-height: 1.15;
+}
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+::selection {
+  background: var(--saffron-soft);
+  color: var(--ink);
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@keyframes shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, var(--surface-2) 0, var(--line) 50%, var(--surface-2) 100%);
+  background-size: 800px 100%;
+  animation: shimmer 1.4s infinite linear;
+  border-radius: 6px;
+}
+
+/* Rich-text composer */
+.composer .ProseMirror {
+  min-height: 220px;
+  outline: none;
+  padding: 12px 14px;
+}
+.composer .ProseMirror p { margin: 0 0 0.6em; }
+.composer .ProseMirror ul { list-style: disc; padding-left: 1.4em; }
+.composer .ProseMirror ol { list-style: decimal; padding-left: 1.4em; }
+.composer .ProseMirror blockquote { border-left: 3px solid var(--line-strong); padding-left: 10px; color: var(--ink-2); }
+.composer .ProseMirror a { color: var(--petrol); text-decoration: underline; }
+.composer .ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  color: var(--ink-3);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}

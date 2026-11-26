@@ -8,6 +8,7 @@ import { CurrentPrincipal } from '../../common/decorators';
 import { UploadedFileData, UserPrincipal } from '../../common/principal';
 import { ApiZodBody, zEmail, ZodPipe } from '../../common/zod';
 import { PREVIEWABLE } from './sanitize';
+import { MailboxesService } from '../mailboxes/mailboxes.service';
 import { WebmailService } from './webmail.service';
 
 const bool = z.union([z.boolean(), z.enum(['true', 'false', '1', '0'])]).transform((v) => v === true || v === 'true' || v === '1');
@@ -65,7 +66,10 @@ const contactSchema = z.object({
 @ApiTags('webmail')
 @Controller('webmail')
 export class WebmailController {
-  constructor(private readonly mail: WebmailService) {}
+  constructor(
+    private readonly mail: WebmailService,
+    private readonly mailboxes: MailboxesService,
+  ) {}
 
   @Get('mailboxes')
   accessible(@CurrentPrincipal() p: UserPrincipal) {
@@ -229,6 +233,12 @@ export class WebmailController {
   async suggest(@CurrentPrincipal() p: UserPrincipal, @Param('mb') mb: string, @Query('q') q = '') {
     if (q.trim().length < 2) return [];
     return this.mail.suggest(await this.mail.ctx(p, mb), q.trim().slice(0, 100));
+  }
+
+  @Get(':mb/connection')
+  async connection(@CurrentPrincipal() p: UserPrincipal, @Param('mb') mb: string) {
+    const c = await this.mail.ctx(p, mb);
+    return this.mailboxes.connectionSettings(c.address);
   }
 
   @Get(':mb/quota')
