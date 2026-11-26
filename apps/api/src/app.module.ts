@@ -17,6 +17,7 @@ import { MailboxesController } from './modules/mailboxes/mailboxes.controller';
 import { MailboxesService } from './modules/mailboxes/mailboxes.service';
 import { MeController } from './modules/me/me.controller';
 import { HealthController } from './modules/monitoring/health.controller';
+import { InternalController } from './modules/monitoring/internal.controller';
 import { MonitoringService } from './modules/monitoring/monitoring.service';
 import { OrganizationsController } from './modules/organizations/organizations.controller';
 import { OrganizationsService } from './modules/organizations/organizations.service';
@@ -27,7 +28,7 @@ export const SERVICES = [AuthService, BillingService, DomainsService, MailboxesS
 
 @Module({
   imports: [CommonModule],
-  controllers: [AuthController, MeController, OrganizationsController, DomainsController, MailboxesController, WebmailController, AdminController, DeliveryController, HealthController],
+  controllers: [AuthController, MeController, OrganizationsController, DomainsController, MailboxesController, WebmailController, AdminController, DeliveryController, HealthController, InternalController],
   providers: [
     ...SERVICES,
     { provide: APP_GUARD, useClass: AuthGuard },

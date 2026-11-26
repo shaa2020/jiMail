@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# JiMail operator tool. Run from the repository root on the server.
+#   ./scripts/jimail init            generate secrets into .env (keeps existing values)
+#   ./scripts/jimail up              build and start the stack
+#   ./scripts/jimail setup-mail      first-time Stalwart configuration (bootstrap → API key → webhook)
+#   ./scripts/jimail create-admin <email> "<name>"   create/promote a platform super admin
+#   ./scripts/jimail status          service health
+#   ./scripts/jimail logs [service]  follow logs
+#   ./scripts/jimail backup          encrypted backup into ./backups
+#   ./scripts/jimail restore <file>  restore a backup (stops the stack)
+#   ./scripts/jimail verify-backup <file>   integrity check + test restore into a scratch database
+#   ./scripts/jimail update          pull, rebuild, migrate and restart
+#   ./scripts/jimail down            stop the stack (data is kept)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+ENV_FILE=.env
+DC="docker compose --env-file $ENV_FILE"
+
+die() { echo "error: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null || die "$1 is required"; }
+envget() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | sed -E 's/[[:space:]]+#.*$//; s/^[[:space:]]+|[[:space:]]+$//g' ; }
+envset() {
+  local k=$1 v=$2
+  if grep -qE "^$k=" "$ENV_FILE" 2>/dev/null; then
+    local tmp; tmp=$(mktemp); awk -v k="$k" -v v="$v" -F= 'BEGIN{OFS="="} $1==k{$0=k"="v} {print}' "$ENV_FILE" > "$tmp" && cat "$tmp" > "$ENV_FILE" && rm -f "$tmp"
+  else echo "$k=$v" >> "$ENV_FILE"; fi
+}
+rand_hex() { openssl rand -hex "$1"; }
+
+cmd_init() {
+  need openssl
+  [ -f "$ENV_FILE" ] || cp .env.example "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  for k in POSTGRES_PASSWORD STALWART_DB_PASSWORD REDIS_PASSWORD STALWART_WEBHOOK_SECRET; do
+    [ -n "$(envget $k)" ] || envset "$k" "$(rand_hex 24)"
+  done
+  [ -n "$(envget APP_SECRET)" ] || envset APP_SECRET "$(rand_hex 32)"
+  [ -n "$(envget APP_ENCRYPTION_KEY)" ] || envset APP_ENCRYPTION_KEY "$(openssl rand -base64 32)"
+  [ -n "$(envget BACKUP_PASSPHRASE)" ] || envset BACKUP_PASSPHRASE "$(rand_hex 32)"
+  for k in APP_DOMAIN MAIL_HOSTNAME ACME_EMAIL; do
+    [ -n "$(envget $k)" ] || echo "  → set $k in $ENV_FILE before starting"
+  done
+  echo "Secrets written to $ENV_FILE (mode 600). Store BACKUP_PASSPHRASE somewhere safe outside this server."
+}
+
+cmd_up() {
+  for k in APP_DOMAIN MAIL_HOSTNAME ACME_EMAIL POSTGRES_PASSWORD APP_SECRET; do [ -n "$(envget $k)" ] || die "$k is not set in $ENV_FILE (run init)"; done
+  $DC up -d --build
+  $DC ps
+}
+
+wait_stalwart() {
+  for _ in $(seq 1 60); do
+    if $DC exec -T api node -e "fetch('http://stalwart:8080/healthz/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" 2>/dev/null; then return 0; fi
+    sleep 2
+  done
+  die "Stalwart did not become healthy"
+}
+
+cmd_setup_mail() {
+  [ -z "$(envget STALWART_API_KEY)" ] || die "STALWART_API_KEY is already set; mail setup has been done"
+  local secrets=infra/secrets/stalwart-admin.json
+  if [ ! -s "$secrets" ]; then
+    local pw; pw=$(rand_hex 16)
+    echo "1/4 Starting Stalwart with a temporary recovery administrator…"
+    envset STALWART_RECOVERY_ADMIN "admin:$pw"
+    $DC up -d --force-recreate stalwart api
+    wait_stalwart
+    echo "2/4 Submitting bootstrap configuration…"
+    umask 077
+    $DC exec -T -e STALWART_RECOVERY_ADMIN="admin:$pw" api node dist/cli/index.js stalwart-bootstrap > "$secrets"
+  fi
+  echo "3/4 Restarting Stalwart with its permanent configuration…"
+  envset STALWART_RECOVERY_ADMIN ""
+  $DC up -d --force-recreate stalwart
+  wait_stalwart
+  local user pass key
+  user=$(sed -E 's/.*"username":"([^"]+)".*/\1/' "$secrets"); pass=$(sed -E 's/.*"password":"([^"]+)".*/\1/' "$secrets")
+  echo "4/4 Creating the JiMail API key and registering delivery webhooks…"
+  key=$($DC exec -T -e STALWART_ADMIN_USER="$user" -e STALWART_ADMIN_PASSWORD="$pass" api node dist/cli/index.js stalwart-finalize | tail -1)
+  [ -n "$key" ] || die "could not create API key"
+  envset STALWART_API_KEY "$key"
+  $DC up -d --force-recreate api worker
+  sleep 5
+  $DC exec -T api node dist/cli/index.js stalwart-webhook
+  echo "Mail server configured. Stalwart admin credentials are in $secrets (mode 600)."
+}
+
+cmd_create_admin() {
+  [ $# -ge 1 ] || die "usage: create-admin <email> [name]"
+  read -r -s -p "Password for $1 (min 12 chars): " pw; echo
+  $DC exec -T -e JIMAIL_ADMIN_PASSWORD="$pw" api node dist/cli/index.js create-admin "$1" "${2:-Administrator}"
+}
+
+cmd_status() {
+  $DC ps
+  $DC exec -T api node -e "fetch('http://127.0.0.1:4000/api/v1/health/ready').then(r=>r.text()).then(console.log)"
+}
+
+cmd_backup() {
+  need openssl
+  local pass; pass=$(envget BACKUP_PASSPHRASE); [ -n "$pass" ] || die "BACKUP_PASSPHRASE missing"
+  local ts dir out; ts=$(date -u +%Y%m%dT%H%M%SZ); dir=$(mktemp -d); out="backups/jimail-$ts.tar.gz.enc"
+  mkdir -p backups && chmod 700 backups
+  umask 077
+  echo "Dumping JiMail database…"
+  $DC exec -T postgres pg_dump -U jimail -d jimail -Fc > "$dir/jimail.dump"
+  echo "Dumping Stalwart database (accounts, mail, DKIM keys, certificates)…"
+  $DC exec -T postgres pg_dump -U jimail -d stalwart -Fc > "$dir/stalwart.dump"
+  $DC exec -T stalwart cat /etc/stalwart/config.json > "$dir/stalwart-config.json"
+  cp "$ENV_FILE" "$dir/env"
+  [ -f infra/secrets/stalwart-admin.json ] && cp infra/secrets/stalwart-admin.json "$dir/"
+  (cd "$dir" && sha256sum ./* > SHA256SUMS)
+  tar -C "$dir" -czf - . | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass "pass:$pass" -out "$out"
+  rm -rf "$dir"
+  sha256sum "$out" > "$out.sha256"
+  # Retention: keep the newest BACKUP_RETENTION (default 14) backups.
+  local keep; keep=$(envget BACKUP_RETENTION); keep=${keep:-14}
+  ls -1t backups/jimail-*.tar.gz.enc 2>/dev/null | tail -n +$((keep + 1)) | while read -r f; do rm -f "$f" "$f.sha256"; done
+  echo "Backup written: $out"
+}
+
+decrypt_to() {
+  local file=$1 dir=$2 pass; pass=$(envget BACKUP_PASSPHRASE)
+  [ -f "$file.sha256" ] && sha256sum -c "$file.sha256" >/dev/null || echo "warning: no checksum file for $file"
+  openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass "pass:$pass" -in "$file" | tar -C "$dir" -xzf -
+  (cd "$dir" && sha256sum -c SHA256SUMS >/dev/null) || die "backup contents failed integrity check"
+}
+
+cmd_verify_backup() {
+  [ $# -eq 1 ] || die "usage: verify-backup <file>"
+  local dir; dir=$(mktemp -d); decrypt_to "$1" "$dir"
+  echo "Checksums OK. Test-restoring into scratch databases…"
+  for db in jimail stalwart; do
+    $DC exec -T postgres psql -U jimail -d postgres -q -c "DROP DATABASE IF EXISTS verify_$db" -c "CREATE DATABASE verify_$db"
+    $DC exec -T postgres pg_restore -U jimail -d "verify_$db" --no-owner < "$dir/$db.dump"
+  done
+  $DC exec -T postgres psql -U jimail -d verify_jimail -tc 'SELECT count(*) || '"' organisations, '"' || (SELECT count(*) FROM "Mailbox") || '"' mailboxes'"' FROM "Organization";'
+  for db in jimail stalwart; do $DC exec -T postgres psql -U jimail -d postgres -qc "DROP DATABASE verify_$db;"; done
+  rm -rf "$dir"
+  echo "Backup verified: decrypts, checksums match and both databases restore."
+}
+
+cmd_restore() {
+  [ $# -eq 1 ] || die "usage: restore <file>"
+  read -r -p "This REPLACES all JiMail and mail data with the backup. Type 'restore' to continue: " ok; [ "$ok" = restore ] || exit 1
+  local dir; dir=$(mktemp -d); decrypt_to "$1" "$dir"
+  $DC stop caddy web api worker stalwart
+  for db in jimail stalwart; do
+    local owner=jimail; [ $db = stalwart ] && owner=stalwart
+    $DC exec -T postgres psql -U jimail -d postgres -q -c "DROP DATABASE IF EXISTS $db WITH (FORCE)" -c "CREATE DATABASE $db OWNER $owner"
+    $DC exec -T postgres pg_restore -U jimail -d "$db" --no-owner --role="$owner" < "$dir/$db.dump"
+  done
+  docker run --rm -v jimail_stalwart-etc:/etc/stalwart -v "$dir":/b alpine sh -c 'cp /b/stalwart-config.json /etc/stalwart/config.json'
+  rm -rf "$dir"
+  $DC up -d
+  echo "Restore complete. Stalwart rebuilds its search index automatically when needed (or run a reindexAccounts task)."
+}
+
+cmd_update() {
+  git pull --ff-only
+  cmd_backup
+  $DC build
+  $DC up -d
+  $DC ps
+}
+
+case "${1:-}" in
+  init) cmd_init ;;
+  up) cmd_up ;;
+  down) $DC down ;;
+  setup-mail) cmd_setup_mail ;;
+  create-admin) shift; cmd_create_admin "$@" ;;
+  status) cmd_status ;;
+  logs) shift; $DC logs -f --tail=200 "$@" ;;
+  backup) cmd_backup ;;
+  verify-backup) shift; cmd_verify_backup "$@" ;;
+  restore) shift; cmd_restore "$@" ;;
+  update) cmd_update ;;
+  *) sed -n '2,15p' "$0"; exit 1 ;;
+esac

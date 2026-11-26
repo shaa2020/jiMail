@@ -1,0 +1,159 @@
+# JiMail production stack. Configure .env (see .env.example), then:
+#   ./scripts/jimail init && ./scripts/jimail up && ./scripts/jimail setup-mail
+name: jimail
+
+x-app-env: &app-env
+  NODE_ENV: production
+  APP_URL: https://${APP_DOMAIN}
+  APP_NAME: ${APP_NAME:-JiMail}
+  DATABASE_URL: postgresql://jimail:${POSTGRES_PASSWORD}@postgres:5432/jimail
+  REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+  APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY}
+  APP_SECRET: ${APP_SECRET}
+  COOKIE_SECURE: "true"
+  TRUST_PROXY: ${TRUST_PROXY:-uniquelocal}
+  ALLOW_SIGNUP: ${ALLOW_SIGNUP:-true}
+  STALWART_URL: http://stalwart:8080
+  STALWART_API_KEY: ${STALWART_API_KEY:-}
+  STALWART_WEBHOOK_SECRET: ${STALWART_WEBHOOK_SECRET}
+  STALWART_WEBHOOK_TARGET: http://api:4000/api/v1/stalwart/webhook
+  MAIL_HOSTNAME: ${MAIL_HOSTNAME}
+  MAIL_PUBLIC_IP: ${MAIL_PUBLIC_IP:-}
+  DNS_RESOLVERS: ${DNS_RESOLVERS:-1.1.1.1,8.8.8.8}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-465}
+  SMTP_SECURE: ${SMTP_SECURE:-true}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_FROM: ${SMTP_FROM:-JiMail <no-reply@localhost>}
+  BILLING_PROVIDER: ${BILLING_PROVIDER:-none}
+  STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+  STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+  ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+      MAIL_HOSTNAME: ${MAIL_HOSTNAME}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [web, api]
+    networks: [edge]
+
+  web:
+    image: ${JIMAIL_IMAGE_PREFIX:-jimail}/web:${JIMAIL_VERSION:-latest}
+    build: { context: ., dockerfile: apps/web/Dockerfile }
+    restart: unless-stopped
+    networks: [edge]
+
+  api:
+    image: ${JIMAIL_IMAGE_PREFIX:-jimail}/api:${JIMAIL_VERSION:-latest}
+    build: { context: ., dockerfile: apps/api/Dockerfile }
+    restart: unless-stopped
+    environment: *app-env
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    networks: [edge, backend]
+
+  worker:
+    image: ${JIMAIL_IMAGE_PREFIX:-jimail}/api:${JIMAIL_VERSION:-latest}
+    restart: unless-stopped
+    command: ["node", "dist/worker.js"]
+    environment: *app-env
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    networks: [backend]
+
+  migrate:
+    image: ${JIMAIL_IMAGE_PREFIX:-jimail}/api:${JIMAIL_VERSION:-latest}
+    command: ["./node_modules/.bin/prisma", "migrate", "deploy"]
+    environment: *app-env
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [backend]
+    restart: "no"
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: jimail
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: jimail
+      STALWART_DB_PASSWORD: ${STALWART_DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init-stalwart.sh:/docker-entrypoint-initdb.d/10-stalwart.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jimail -d jimail"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [backend]
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    networks: [backend]
+
+  stalwart:
+    image: stalwartlabs/stalwart:${STALWART_VERSION:-v1}
+    init: true
+    restart: unless-stopped
+    # Mail protocols are published directly; the HTTP listener (8080) is reachable only from the
+    # internal network (Caddy proxies JMAP/DAV/autoconfig and ACME HTTP-01 challenges to it).
+    ports:
+      - "25:25"
+      - "465:465"
+      - "993:993"
+      - "995:995"
+      - "4190:4190"
+    environment:
+      STALWART_HOSTNAME: ${MAIL_HOSTNAME}
+      STALWART_PUBLIC_URL: https://${MAIL_HOSTNAME}
+      STALWART_DB_PASSWORD: ${STALWART_DB_PASSWORD}
+      STALWART_HEALTHCHECK_URL: http://127.0.0.1:8080/healthz/live
+      # Only set during ./scripts/jimail setup-mail; empty afterwards.
+      STALWART_RECOVERY_ADMIN: ${STALWART_RECOVERY_ADMIN:-}
+    volumes:
+      - stalwart-etc:/etc/stalwart
+      - stalwart-data:/var/lib/stalwart
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [backend, edge]
+
+volumes:
+  caddy-data:
+  caddy-config:
+  postgres-data:
+  redis-data:
+  stalwart-etc:
+  stalwart-data:
+
+networks:
+  edge:
+  backend:
+    internal: false

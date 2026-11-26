@@ -91,7 +91,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   if (c.NODE_ENV === 'production') {
     if (c.MAIL_TRANSPORT === 'file') throw new Error('MAIL_TRANSPORT=file is not allowed in production');
     if (!c.COOKIE_SECURE) throw new Error('COOKIE_SECURE must be true in production');
-    if (!c.STALWART_API_KEY) throw new Error('STALWART_API_KEY is required in production');
+  }
+  if (!c.STALWART_API_KEY) {
+    // Allowed during first-time setup; mail operations return 503 until ./scripts/jimail setup-mail has run.
+    console.warn('[jimail] STALWART_API_KEY is not set — mail server integration disabled');
   }
   cached = c;
   return c;
