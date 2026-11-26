@@ -1,0 +1,570 @@
+// JiMail relational schema.
+// Mail content is NOT stored here: Stalwart owns mailbox storage.
+// Every tenant-owned row carries organizationId and is always queried with it.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────── Identity ─────────────────────────────
+
+enum PlatformRole {
+  SUPER_ADMIN
+  USER
+}
+
+enum OrgRole {
+  OWNER
+  ADMIN
+  MAILBOX_ADMIN
+  MEMBER
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum AuthSource {
+  LOCAL // password hash stored by JiMail
+  MAILBOX // password verified against Stalwart (mailbox users)
+}
+
+model User {
+  id                String       @id @default(cuid())
+  email             String       @unique
+  name              String
+  passwordHash      String?
+  authSource        AuthSource   @default(LOCAL)
+  platformRole      PlatformRole @default(USER)
+  status            UserStatus   @default(ACTIVE)
+  emailVerifiedAt   DateTime?
+  totpSecretEnc     String? // AES-GCM encrypted base32 secret
+  totpEnabledAt     DateTime?
+  failedLoginCount  Int          @default(0)
+  lockedUntil       DateTime?
+  lastLoginAt       DateTime?
+  suspendedReason   String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  memberships    Membership[]
+  sessions       Session[]
+  tokens         UserToken[]
+  recoveryCodes  RecoveryCode[]
+  loginEvents    LoginEvent[]
+  mailboxAccess  MailboxAccess[]
+  auditLogs      AuditLog[]     @relation("actor")
+  notifications  Notification[]
+  invitationsSent Invitation[]  @relation("inviter")
+  apiKeysCreated ApiKey[]       @relation("apiKeyCreator")
+}
+
+model Membership {
+  id             String       @id @default(cuid())
+  userId         String
+  organizationId String
+  role           OrgRole
+  createdAt      DateTime     @default(now())
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@index([organizationId])
+}
+
+model Session {
+  id           String    @id @default(cuid())
+  userId       String
+  tokenHash    String    @unique
+  csrfToken    String
+  ip           String?
+  userAgent    String?
+  mfaPending   Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  lastSeenAt   DateTime  @default(now())
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+enum TokenPurpose {
+  EMAIL_VERIFY
+  PASSWORD_RESET
+}
+
+model UserToken {
+  id         String       @id @default(cuid())
+  userId     String
+  purpose    TokenPurpose
+  tokenHash  String       @unique
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime     @default(now())
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose])
+}
+
+model RecoveryCode {
+  id        String    @id @default(cuid())
+  userId    String
+  codeHash  String
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model LoginEvent {
+  id         String   @id @default(cuid())
+  userId     String?
+  email      String
+  success    Boolean
+  reason     String?
+  ip         String?
+  userAgent  String?
+  suspicious Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([email, createdAt])
+}
+
+// ─────────────────────────── Organisations ───────────────────────────
+
+enum OrgStatus {
+  ACTIVE
+  SUSPENDED
+  PENDING_DELETION
+}
+
+model Organization {
+  id              String     @id @default(cuid())
+  name            String
+  slug            String     @unique
+  status          OrgStatus  @default(ACTIVE)
+  suspendedReason String?
+  // Security policy
+  require2fa      Boolean    @default(false)
+  // Limits (null = take plan limit)
+  maxMailboxesOverride   Int?
+  maxDomainsOverride     Int?
+  maxStorageMbOverride   Int?
+  sendLimitPerHourOverride Int?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  deletedAt       DateTime?
+
+  memberships   Membership[]
+  domains       Domain[]
+  mailboxes     Mailbox[]
+  invitations   Invitation[]
+  subscription  Subscription?
+  invoices      Invoice[]
+  payments      Payment[]
+  apiKeys       ApiKey[]
+  auditLogs     AuditLog[]
+  securityEvents SecurityEvent[]
+  deliveryEvents DeliveryEvent[]
+  usageSnapshots UsageSnapshot[]
+  notifications Notification[]
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
+}
+
+model Invitation {
+  id             String           @id @default(cuid())
+  organizationId String
+  email          String
+  role           OrgRole
+  tokenHash      String           @unique
+  status         InvitationStatus @default(PENDING)
+  invitedById    String
+  expiresAt      DateTime
+  createdAt      DateTime         @default(now())
+  acceptedAt     DateTime?
+  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  invitedBy      User             @relation("inviter", fields: [invitedById], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status])
+}
+
+// ───────────────────────────── Domains ─────────────────────────────
+
+enum DomainStatus {
+  PENDING_VERIFICATION // ownership TXT not yet seen
+  VERIFIED // ownership proven, provisioned in Stalwart, DNS incomplete
+  ACTIVE // ownership + all required mail records pass
+  SUSPENDED
+}
+
+model Domain {
+  id                String        @id @default(cuid())
+  organizationId    String
+  name              String        @unique // lowercase, globally unique across tenants
+  status            DomainStatus  @default(PENDING_VERIFICATION)
+  verificationToken String
+  verifiedAt        DateTime?
+  stalwartId        String?       @unique
+  catchAllAddress   String?
+  lastCheckedAt     DateTime?
+  mailReadyAt       DateTime?
+  suspendedReason   String?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  organization      Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  dnsChecks         DnsCheck[]
+  mailboxes         Mailbox[]
+  aliases           Alias[]
+
+  @@index([organizationId])
+}
+
+enum DnsRecordKind {
+  OWNERSHIP
+  MX
+  SPF
+  DKIM
+  DMARC
+  MTA_STS
+  TLS_RPT
+  AUTOCONFIG
+  PTR
+}
+
+enum DnsCheckStatus {
+  PASS
+  FAIL
+  WARN
+  PENDING
+}
+
+model DnsCheck {
+  id         String         @id @default(cuid())
+  domainId   String
+  kind       DnsRecordKind
+  host       String
+  type       String
+  expected   String
+  found      String?
+  status     DnsCheckStatus
+  required   Boolean        @default(true)
+  message    String?
+  checkedAt  DateTime       @default(now())
+  domain     Domain         @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@unique([domainId, kind, host])
+  @@index([domainId])
+}
+
+// ───────────────────────────── Mailboxes ─────────────────────────────
+
+enum MailboxStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+model Mailbox {
+  id               String         @id @default(cuid())
+  organizationId   String
+  domainId         String
+  localPart        String
+  address          String         @unique
+  displayName      String
+  status           MailboxStatus  @default(ACTIVE)
+  stalwartId       String?        @unique
+  // Encrypted Stalwart API key used by the backend for this mailbox's JMAP session
+  serviceKeyEnc    String?
+  quotaMb          Int
+  usedBytes        BigInt         @default(0)
+  usageSyncedAt    DateTime?
+  sendLimitPerHour Int?
+  forwardTo        String[]       @default([])
+  forwardKeepCopy  Boolean        @default(true)
+  forwardRuleId    String?
+  suspendedReason  String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  deletedAt        DateTime?
+  organization     Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  domain           Domain         @relation(fields: [domainId], references: [id], onDelete: Restrict)
+  aliases          Alias[]
+  access           MailboxAccess[]
+  deliveryEvents   DeliveryEvent[]
+
+  @@unique([domainId, localPart])
+  @@index([organizationId, status])
+}
+
+model Alias {
+  id             String   @id @default(cuid())
+  organizationId String
+  mailboxId      String
+  domainId       String
+  localPart      String
+  address        String   @unique
+  position       Int // key in Stalwart aliases list
+  createdAt      DateTime @default(now())
+  mailbox        Mailbox  @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+  domain         Domain   @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([mailboxId])
+}
+
+// Grants a JiMail user webmail access to a mailbox
+model MailboxAccess {
+  id        String   @id @default(cuid())
+  userId    String
+  mailboxId String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mailbox   Mailbox  @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, mailboxId])
+}
+
+// ───────────────────────────── Billing ─────────────────────────────
+
+model Plan {
+  id               String   @id @default(cuid())
+  code             String   @unique
+  name             String
+  description      String
+  priceMonthlyCents Int
+  currency         String   @default("EUR")
+  maxMailboxes     Int
+  maxDomains       Int
+  storagePerMailboxMb Int
+  maxStorageMb     Int
+  sendLimitPerHour Int
+  trialDays        Int      @default(14)
+  features         String[] @default([])
+  isPublic         Boolean  @default(true)
+  isActive         Boolean  @default(true)
+  stripePriceId    String?
+  sortOrder        Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  subscriptions    Subscription[]
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE // in grace period
+  SUSPENDED // unpaid after grace
+  CANCELED
+}
+
+model Subscription {
+  id                     String             @id @default(cuid())
+  organizationId         String             @unique
+  planId                 String
+  status                 SubscriptionStatus
+  trialEndsAt            DateTime?
+  currentPeriodStart     DateTime
+  currentPeriodEnd       DateTime
+  graceEndsAt            DateTime?
+  cancelAtPeriodEnd      Boolean            @default(false)
+  provider               String? // "stripe" | "manual"
+  providerCustomerId     String?
+  providerSubscriptionId String?            @unique
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+  organization           Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  plan                   Plan               @relation(fields: [planId], references: [id])
+}
+
+enum InvoiceStatus {
+  DRAFT
+  OPEN
+  PAID
+  VOID
+  UNCOLLECTIBLE
+}
+
+// Invoices are only created from provider data (webhooks) or explicit admin action — never fabricated.
+model Invoice {
+  id                String        @id @default(cuid())
+  organizationId    String
+  number            String?
+  status            InvoiceStatus
+  amountDueCents    Int
+  amountPaidCents   Int           @default(0)
+  currency          String
+  periodStart       DateTime?
+  periodEnd         DateTime?
+  hostedUrl         String?
+  provider          String
+  providerInvoiceId String?       @unique
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  organization      Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  payments          Payment[]
+
+  @@index([organizationId])
+}
+
+model Payment {
+  id                String       @id @default(cuid())
+  organizationId    String
+  invoiceId         String?
+  amountCents       Int
+  currency          String
+  status            String
+  provider          String
+  providerPaymentId String?      @unique
+  createdAt         DateTime     @default(now())
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  invoice           Invoice?     @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+}
+
+model BillingEvent {
+  id              String   @id @default(cuid())
+  provider        String
+  providerEventId String   @unique
+  type            String
+  processedAt     DateTime @default(now())
+}
+
+// ───────────────────────────── API ─────────────────────────────
+
+model ApiKey {
+  id             String       @id @default(cuid())
+  organizationId String
+  name           String
+  prefix         String // first chars shown in UI
+  keyHash        String       @unique
+  scopes         String[]
+  createdById    String
+  lastUsedAt     DateTime?
+  lastUsedIp     String?
+  expiresAt      DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy      User         @relation("apiKeyCreator", fields: [createdById], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+}
+
+// ─────────────────────── Audit, security, telemetry ───────────────────────
+
+model AuditLog {
+  id             String        @id @default(cuid())
+  organizationId String?
+  actorUserId    String?
+  actorApiKeyId  String?
+  action         String
+  targetType     String?
+  targetId       String?
+  metadata       Json?
+  ip             String?
+  createdAt      DateTime      @default(now())
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  actor          User?         @relation("actor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([createdAt])
+  @@index([action])
+}
+
+enum Severity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+model SecurityEvent {
+  id             String        @id @default(cuid())
+  organizationId String?
+  type           String
+  severity       Severity
+  message        String
+  metadata       Json?
+  resolvedAt     DateTime?
+  createdAt      DateTime      @default(now())
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([severity, resolvedAt])
+}
+
+enum DeliveryDirection {
+  INBOUND
+  OUTBOUND
+}
+
+model DeliveryEvent {
+  id              String            @id @default(cuid())
+  stalwartEventId String            @unique
+  organizationId  String?
+  mailboxId       String?
+  type            String // raw Stalwart event type, e.g. delivery.delivered
+  category        String // delivered | failed | temp_fail | bounce | queued | spam | ham | auth_failed | abuse_report
+  direction       DeliveryDirection?
+  sender          String?
+  recipient       String?
+  remoteIp        String?
+  detail          String?
+  occurredAt      DateTime
+  createdAt       DateTime          @default(now())
+  organization    Organization?     @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  mailbox         Mailbox?          @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, occurredAt])
+  @@index([category, occurredAt])
+  @@index([mailboxId, occurredAt])
+}
+
+model UsageSnapshot {
+  id             String       @id @default(cuid())
+  organizationId String
+  mailboxes      Int
+  domains        Int
+  storageBytes   BigInt
+  takenAt        DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, takenAt])
+}
+
+model Notification {
+  id             String        @id @default(cuid())
+  userId         String?
+  organizationId String?
+  title          String
+  body           String
+  level          Severity      @default(INFO)
+  readAt         DateTime?
+  createdAt      DateTime      @default(now())
+  user           User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+}
+
+model SystemSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}

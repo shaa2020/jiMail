@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.next/
+out/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+var/
+backups/
+playwright-report/
+test-results/
+*.tsbuildinfo
+.DS_Store
+infra/secrets/*
+!infra/secrets/.gitkeep
