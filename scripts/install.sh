@@ -6,12 +6,24 @@ set -euo pipefail
 DOMAIN=${1:?usage: install.sh <domain> <admin-email> [admin-password]}
 ADMIN_EMAIL=${2:?usage: install.sh <domain> <admin-email> [admin-password]}
 ADMIN_PASSWORD=${3:-}
-BRANCH=${JIMAIL_BRANCH:-ccr-1b38f820-4hq3tq}
+BRANCH=${JIMAIL_BRANCH:-ccr-8668e004-mcjki1}
 REPO=${JIMAIL_REPO:-https://github.com/shaa2020/jiMail.git}
 DIR=/opt/jimail
 LOG=/var/log/jimail-install.log
 exec > >(tee -a "$LOG") 2>&1
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
+
+step "Checking the server"
+MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
+FREE_GB=$(df -BG --output=avail / | tail -1 | tr -dc 0-9)
+SWAP_ON=$(swapon --show | grep -c /swapfile || true)
+if [ "$MEM_MB" -lt 900 ]; then
+  echo "This server has ${MEM_MB} MB of memory; JiMail needs at least 1 GB (the \$6 s-1vcpu-1gb Droplet)."
+  echo "Resize the Droplet (Resize -> CPU and RAM + disk) or create a new one, then run this command again."; exit 1
+fi
+if [ "$FREE_GB" -lt $(( SWAP_ON ? 6 : 9 )) ]; then
+  echo "Only ${FREE_GB} GB of disk is free; JiMail needs about 6 GB plus 3 GB for swap. Use a 25 GB disk."; exit 1
+fi
 
 step "Swap (helps small servers build the app)"
 if ! swapon --show | grep -q /swapfile; then
@@ -25,7 +37,7 @@ apt-get update -y -q && apt-get install -y -q git openssl curl ca-certificates >
 command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
 
 step "Downloading JiMail"
-if [ -d "$DIR/.git" ]; then git -C "$DIR" pull --ff-only; else git clone -b "$BRANCH" "$REPO" "$DIR"; fi
+if [ -d "$DIR/.git" ]; then git -C "$DIR" fetch origin "$BRANCH" && git -C "$DIR" checkout -B "$BRANCH" FETCH_HEAD; else git clone -b "$BRANCH" "$REPO" "$DIR"; fi
 cd "$DIR"
 
 step "Configuration"
