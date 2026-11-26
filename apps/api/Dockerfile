@@ -17,6 +17,8 @@ RUN --mount=type=secret,id=ca,required=false \
 
 FROM base AS build
 WORKDIR /repo
+# Let the compiler use swap on small (1 GB) servers instead of failing at the default heap limit.
+ENV NODE_OPTIONS=--max-old-space-size=1536
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/api/package.json apps/api/
 # Optional build secret "ca": extra CA bundle for builds behind a TLS-intercepting proxy.
